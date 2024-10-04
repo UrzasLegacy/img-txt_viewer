@@ -40,6 +40,8 @@ import webbrowser
 import subprocess
 import configparser
 from collections import defaultdict, Counter
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import tkinter.font
 from tkinter import ttk, Tk, Toplevel, messagebox, filedialog, simpledialog, StringVar, BooleanVar, IntVar, Menu, PanedWindow, Frame, Label, Button, Entry, Checkbutton, Text, Event, TclError
@@ -47,12 +49,15 @@ from tkinter.filedialog import askdirectory
 from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageTk, ImageSequence, UnidentifiedImageError
+from PIL.PngImagePlugin import PngInfo
 
 from main.scripts import crop_image, batch_crop_images, resize_image, image_grid
 from main.scripts.PopUpZoom import PopUpZoom as PopUpZoom
 from main.scripts.TkToolTip import TkToolTip as ToolTip
 from main.bin import upscale_image
 
+executor = ThreadPoolExecutor(max_workers=5)  # Adjust the number of workers as needed
+file_locks = {}  # Dictionary to maintain locks for each file
 
 #endregion
 ################################################################################################################################################
@@ -332,6 +337,7 @@ class ImgTxtViewer:
         self.cleaning_text_var = BooleanVar(value=True)
         self.auto_save_var = BooleanVar(value=False)
         self.auto_delete_blank_files_var = BooleanVar(value=False)
+        self.png_metadata_captions_var = BooleanVar(value=False)
         self.big_save_button_var = BooleanVar(value=False)
         self.highlight_selection_var = BooleanVar(value=True)
         self.highlight_use_regex_var = BooleanVar(value=False)
@@ -448,6 +454,7 @@ class ImgTxtViewer:
         # Options
         self.optionsMenu.add_checkbutton(label="Clean-Text", underline=0, state="disable", variable=self.cleaning_text_var, command=self.toggle_list_menu)
         self.optionsMenu.add_checkbutton(label="Auto-Delete Blank Files", underline=0, state="disable", variable=self.auto_delete_blank_files_var)
+        self.optionsMenu.add_checkbutton(label="Save Captions to PNG Metadata", underline=0, state="disable", variable=self.png_metadata_captions_var)
         self.optionsMenu.add_checkbutton(label="Colored Suggestions", underline=1, state="disable", variable=self.colored_suggestion_var, command=self.update_autocomplete_dictionary)
         self.optionsMenu.add_checkbutton(label="Highlight Selection", underline=0, state="disable", variable=self.highlight_selection_var)
         self.optionsMenu.add_checkbutton(label="Big Save Button", underline=0, state="disable", variable=self.big_save_button_var, command=self.toggle_save_button_height)
@@ -1425,6 +1432,7 @@ class ImgTxtViewer:
                               "Match Mode",
                               "Clean-Text",
                               "Auto-Delete Blank Files",
+                              "Save Captions to PNG Metadata",
                               "Colored Suggestions",
                               "Highlight Selection",
                               "Big Save Button",
@@ -1907,17 +1915,24 @@ class ImgTxtViewer:
         self.text_box.config(undo=True)
 
 
-    def load_image_file(self, image_file, text_file):
+    def load_image_file(self, image_path, text_file):
+        if image_path not in file_locks:
+            file_locks[image_path] = threading.Lock()
+
+        file_lock = file_locks[image_path]
+
         try:
-            with Image.open(self.image_file) as image_file:
+            with Image.open(image_path) as image_file:
                 self.original_image_size = image_file.size
+                with file_lock:
+                    temp_image = image_file.copy()
                 max_size = (self.quality_max_size, self.quality_max_size)
-                image_file.thumbnail(max_size, Image.NEAREST)
-                if image_file.format == 'GIF':
-                    self.gif_frames = [frame.copy() for frame in ImageSequence.Iterator(image_file)]
-                    self.frame_durations = [frame.info['duration'] for frame in ImageSequence.Iterator(image_file)]
+                temp_image.thumbnail(max_size, Image.NEAREST)
+                if temp_image.format == 'GIF':
+                    self.gif_frames = [frame.copy() for frame in ImageSequence.Iterator(temp_image)]
+                    self.frame_durations = [frame.info['duration'] for frame in ImageSequence.Iterator(temp_image)]
                 else:
-                    self.gif_frames = [image_file.copy()]
+                    self.gif_frames = [temp_image.copy()]
                     self.frame_durations = [None]
         except (FileNotFoundError, UnidentifiedImageError):
             self.update_image_file_count()
@@ -1925,7 +1940,7 @@ class ImgTxtViewer:
             if text_file in self.text_files:
                 self.text_files.remove(text_file)
             return
-        return image_file
+        return temp_image
 
 
     def display_image(self):
@@ -3137,6 +3152,7 @@ class ImgTxtViewer:
             self.config.set("Other", "process_image_stats", str(self.process_image_stats_var.get()))
             self.config.set("Other", "use_mytags", str(self.use_mytags_var.get()))
             self.config.set("Other", "auto_delete_blank_files", str(self.auto_delete_blank_files_var.get()))
+            self.config.set("Other", "png_metadata_captions", str(self.png_metadata_captions_var.get()))
 
             # Write updated settings back to file
             with open(self.app_settings_cfg, "w", encoding="utf-8") as f:
@@ -3193,6 +3209,7 @@ class ImgTxtViewer:
         self.process_image_stats_var.set(value=False)
         self.use_mytags_var.set(value=True)
         self.auto_delete_blank_files_var.set(value=False)
+        self.png_metadata_captions_var.set(value=False)
         # Font
         if hasattr(self, 'text_box'):
             self.font_var.set(value="Courier New")
@@ -3255,6 +3272,7 @@ class ImgTxtViewer:
         self.process_image_stats_var.set(value=self.config.getboolean("Other", "process_image_stats", fallback=False))
         self.use_mytags_var.set(value=self.config.getboolean("Other", "use_mytags", fallback=True))
         self.auto_delete_blank_files_var.set(value=self.config.getboolean("Other", "auto_delete_blank_files", fallback=False))
+        self.png_metadata_captions_var.set(value=self.config.getboolean("Other", "png_metadata_captions", fallback=False))
 
 
 #endregion
@@ -3270,6 +3288,9 @@ class ImgTxtViewer:
                     self.message_label.config(text="Saved", bg="#6ca079", fg="white")
                 else:
                     self.message_label.config(text="No Change", bg="#f0f0f0", fg="black")
+                    
+                if self.png_metadata_captions_var.get():
+                    self.save_caption_metadata()
         except (PermissionError, IOError, TclError) as e:
             messagebox.showerror("Error", f"An error occurred while saving the current text file.\n\n{e}")
 
@@ -3296,6 +3317,43 @@ class ImgTxtViewer:
         with open(text_file, "w+", encoding="utf-8") as f:
             f.write(text)
         return True
+
+
+    def save_caption_metadata(self):
+        text = self.text_box.get("1.0", "end-1c")
+        if self.cleaning_text_var.get():
+            text = self.cleanup_text(text)
+        if self.list_mode_var.get():
+            text = ', '.join(text.split('\n'))
+
+        # Submit the saving task to the executor thread pool
+        executor.submit(self._save_image, self.image_file, text)
+
+
+    def _save_image(self, file_path, text):
+        # Get or create a lock for the given file
+        if file_path not in file_locks:
+            file_locks[file_path] = threading.Lock()
+
+        file_lock = file_locks[file_path]
+
+        # Use the lock to ensure only one thread is saving to this file at a time
+        with file_lock:
+            try:
+                with Image.open(file_path) as img:
+                    if img.format != 'PNG':
+                        raise ValueError("The image format must be PNG.")
+                    if img.mode in ("RGBA", "P"):
+                        img = img.convert("RGB")
+                    metadata = PngInfo()
+                    metadata.add_text("img-txt_viewer_caption", text)
+                    img.save(file_path, "PNG", pnginfo=metadata)
+                
+                print(f"Caption added to {file_path}")
+            except FileNotFoundError:
+                print(f"The specified image file does not exist: {file_path}")
+            except Exception as e:
+                print(f"An error occurred while saving the image: {e}")
 
 
     def on_closing(self):
